@@ -1,0 +1,101 @@
+# Databricks notebook source
+# DBTITLE 1,Widgets 
+# dbutils.widgets.removeAll()
+dbutils.widgets.text("config", "{config}", "config")
+dbutils.widgets.text("environment", "acc", "environment")
+dbutils.widgets.text("interval", "48", "interval") 
+dbutils.widgets.dropdown("interval_type", "HOURS", ["HOURS","DAYS","WEEKS","MONTHS", "YEARS"], "interval_type")
+
+
+
+# COMMAND ----------
+
+# MAGIC %pip install pyyaml
+
+# COMMAND ----------
+
+# DBTITLE 1,Setup pyodbc
+# MAGIC %sh
+# MAGIC pip install pyodbc
+# MAGIC curl https://packages.microsoft.com/keys/microsoft.asc | apt-key add -
+# MAGIC curl https://packages.microsoft.com/config/ubuntu/16.04/prod.list > /etc/apt/sources.list.d/mssql-release.list
+# MAGIC apt-get update
+# MAGIC ACCEPT_EULA=Y apt-get install msodbcsql17
+# MAGIC exit
+
+# COMMAND ----------
+
+# DBTITLE 1,Import Libraries 
+import re
+import yaml 
+import json
+import pyodbc
+from pyspark.sql import DataFrameWriter
+
+# COMMAND ----------
+
+# DBTITLE 1,Configuration Validation
+environment = dbutils.widgets.get("environment")
+config = dbutils.widgets.get("config")
+interval = dbutils.widgets.get("interval")
+interval_type = dbutils.widgets.get("interval_type")
+print(f"Environment -> {environment} \nInterval -> {interval} \nInterval_type -> {interval_type}")
+
+# COMMAND ----------
+
+# MAGIC %run ./utils
+
+# COMMAND ----------
+
+#TODO read this configuration by using the widgets
+config = yaml.safe_load(config)
+
+# COMMAND ----------
+
+# DBTITLE 1,Read Configurations
+sql_query = config['sources'][list(config['sources'])[0]]['sql']
+
+#Source
+source_opco = config['sources'][list(config['sources'])[0]]['identifier']['opco']
+source_platform = config['sources'][list(config['sources'])[0]]['identifier']['platform']
+source_datastore = config['sources'][list(config['sources'])[0]]['identifier']['datastore']
+source_dataset = config['sources'][list(config['sources'])[0]]['identifier']['dataset']
+source_department = config['sources'][list(config['sources'])[0]]['identifier']['department']
+
+
+#Destination
+merge_query = config['destinations'][list(config['destinations'])[0]]['sql']
+target_table_name = config['destinations'][list(config['destinations'])[0]]['identifier']['dataset']
+target_table_schema = config['destinations'][list(config['destinations'])[0]]['identifier']['schema']
+target_datastore = config['destinations'][list(config['destinations'])[0]]['identifier']['datastore']
+destination_type = config['destinations'][list(config['destinations'])[0]]['type']['name']
+
+print(f"Source :: \nSource OPCO -> {source_opco} \nSource Platform -> {source_platform} \nSource Datastore -> {source_datastore} \nSource Department -> {source_department} \n\nDestination :: \nTarget Table Name -> {target_table_name} \nTarget Table Schema -> {target_table_schema} \nTarget Datastore -> {target_datastore} \nDestination Type -> {destination_type}")
+
+# COMMAND ----------
+
+# DBTITLE 1,Incremental Load
+for filters in (("{interval}", interval), ("{interval_type}", interval_type)):
+   sql_query = sql_query.replace(*filters)
+
+print(sql_query)
+
+# COMMAND ----------
+
+# DBTITLE 1,Create Target Dataframe
+target_df = spark.sql(sql_query)
+processing_row_count = target_df.count()
+print("Record count from source table -> " + str(processing_row_count) + "\n")
+target_df.persist()
+
+# COMMAND ----------
+
+
+if destination_type == "sqltable":
+  #Will always be staging for incremental load
+  staging_schema = "staging"
+  print(write_to_sql_db(target_df, staging_schema, target_table_schema, target_table_name, merge_query, True, environment))
+elif destination_type == "delta":
+  #merge with delta table 
+  df = write_to_delta(target_df, target_table_name, merge_query, source_datastore)
+  display(df)
